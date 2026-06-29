@@ -82,12 +82,15 @@ def report(limit: int):
 
 
 def main(argv=None):
+    global DB
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-i", "--input", help="enriched JSON (array or {records:[...]}); default stdin")
     p.add_argument("--candidates", help="search JSON to map id->area_tag")
+    p.add_argument("--db", default=DB, help=f"SQLite store path (default {DB})")
     p.add_argument("--top", type=int, help="print markdown report of top N and exit")
     args = p.parse_args(argv)
+    DB = args.db  # ingest()/report() read this module global
 
     if not args.input:  # nothing to ingest -> report-only
         report(args.top if args.top is not None else 20)

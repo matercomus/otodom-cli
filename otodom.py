@@ -385,6 +385,24 @@ def meta(args) -> list:
     return out
 
 
+def _to_store_record(r: dict) -> dict:
+    """Map a search/details record onto store.py's schema: bathtub/garden as
+    yes/no/unknown strings, and #7's source_location -> area_tag."""
+    def yn(key):
+        v = r.get(key)
+        return "yes" if v is True else "no" if v is False else "unknown"
+    return {**r, "bathtub": yn("has_bathtub"), "garden": yn("has_garden")}
+
+
+def persist(records: list, db_path: str):
+    """UPSERT records into the SQLite store by Otodom id (reuses store.ingest).
+    Idempotent — re-running the same search updates rows in place."""
+    import store
+    store.DB = db_path  # point the store at the chosen file
+    area_by_id = {r["id"]: r.get("source_location") for r in records}
+    store.ingest([_to_store_record(r) for r in records], area_by_id)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="otodom", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -414,6 +432,8 @@ def main(argv=None):
     s.add_argument("--delay", type=float, default=0.5, help="seconds between pages")
     s.add_argument("--query", action="append", metavar="KEY=VAL",
                    help="extra raw Otodom query params (repeatable), e.g. areaMin=40")
+    s.add_argument("--db", metavar="PATH",
+                   help="also UPSERT results into this SQLite store (read back: store.py --top)")
     s.add_argument("-o", "--output", help="write JSON here instead of stdout")
     s.add_argument("--pretty", action="store_true", help="indent JSON output")
 
@@ -421,6 +441,8 @@ def main(argv=None):
     d.add_argument("urls", nargs="*", help="ad URLs (or pipe/-i a search JSON array)")
     d.add_argument("-i", "--input", help="search JSON file to read URLs from")
     d.add_argument("--delay", type=float, default=0.5, help="seconds between ads")
+    d.add_argument("--db", metavar="PATH",
+                   help="also UPSERT enriched ads into this SQLite store (read back: store.py --top)")
     d.add_argument("-o", "--output", help="write JSON here instead of stdout")
     d.add_argument("--pretty", action="store_true", help="indent JSON output")
 
@@ -438,6 +460,8 @@ def main(argv=None):
     except OtodomError as e:  # one clean stderr line, nonzero exit, no traceback
         print(f"[otodom] error: {e}", file=sys.stderr)
         sys.exit(2)
+    if getattr(args, "db", None) and not getattr(args, "meta", False):
+        persist(results, args.db)
     out = json.dumps(results, ensure_ascii=False, indent=2 if args.pretty else None)
     if getattr(args, "output", None):
         with open(args.output, "w", encoding="utf-8") as f:
