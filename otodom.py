@@ -242,26 +242,37 @@ def fetch_page(url: str, params: dict) -> dict:
     return sa
 
 
-def search(args) -> list:
-    if getattr(args, "location", None):
-        cands = resolve_location(args.location)
-        if not cands:
-            raise OtodomError(f"no location match for {args.location!r}")
-        chosen = cands[0]  # autosuggest ranks best first
-        if len(cands) > 1:
-            print(f"[otodom] {args.location!r} -> {chosen['label']} ({chosen['level']}); "
-                  f"{len(cands) - 1} other matches — run `locations` to disambiguate",
-                  file=sys.stderr)
-        loc = chosen["path"]
-    elif args.city:
+def _search_targets(args) -> list:
+    """Resolve CLI args to a list of (location_path, source_label) to fetch.
+    Multiple --location (repeatable) yield multiple targets; --city is one."""
+    prefix = (f"{BASE}/pl/wyniki/{TRANSACTIONS[args.transaction]}/"
+              f"{PROPERTY_TYPES[args.property_type]}/")
+    locations = getattr(args, "location", None) or []
+    if locations:
+        targets = []
+        for name in locations:
+            cands = resolve_location(name)
+            if not cands:
+                print(f"[otodom] no location match for {name!r} — skipping", file=sys.stderr)
+                continue
+            chosen = cands[0]  # autosuggest ranks best first
+            if len(cands) > 1:
+                print(f"[otodom] {name!r} -> {chosen['label']} ({chosen['level']}); "
+                      f"{len(cands) - 1} other matches — run `locations` to disambiguate",
+                      file=sys.stderr)
+            targets.append((prefix + chosen["path"], chosen["label"]))
+        if not targets:
+            raise OtodomError("no --location resolved to anything searchable")
+        return targets
+    if args.city:
         loc = f"{slugify(args.province)}/{slugify(args.city)}"
         if args.district:
             loc += f"/{slugify(args.district)}"
-    else:
-        raise OtodomError("search needs --location NAME or --city CITY")
-    path = (f"{BASE}/pl/wyniki/{TRANSACTIONS[args.transaction]}/"
-            f"{PROPERTY_TYPES[args.property_type]}/{loc}")
+        return [(prefix + loc, None)]
+    raise OtodomError("search needs --location NAME or --city CITY")
 
+
+def _build_params(args) -> dict:
     params: dict = {"limit": 72}
     if args.min is not None:
         params["priceMin"] = args.min
@@ -274,24 +285,54 @@ def search(args) -> list:
     for kv in args.query or []:
         k, _, v = kv.partition("=")
         params[k] = v
+    return params
 
+
+def _fetch_listings(path, params, args, source) -> list:
+    """Fetch up to args.pages of one location's listings, tagged with source."""
     first = fetch_page(path, params)
     total_items = (first.get("pagination") or {}).get("totalItems", 0)
     if not total_items:
         raise OtodomError(f"0 listings match this search: {path}")
     total_pages = (first.get("pagination") or {}).get("totalPages", 1)
     pages = min(total_pages, args.pages)
-    print(f"[otodom] {total_items} listings, "
+    print(f"[otodom] {source or path}: {total_items} listings, "
           f"{total_pages} pages; fetching {pages}", file=sys.stderr)
-
     items = list(first.get("items") or [])
     for page in range(2, pages + 1):
         time.sleep(args.delay)
         sa = fetch_page(path, {**params, "page": page})
         items += sa.get("items") or []
         print(f"[otodom] page {page}/{pages} ({len(items)} so far)", file=sys.stderr)
+    recs = []
+    for it in items:
+        r = parse_item(it)
+        if source is not None:
+            r["source_location"] = source
+        recs.append(r)
+    return recs
 
-    return [parse_item(it) for it in items]
+
+def search(args) -> list:
+    """Fetch every target location, merge into one array deduped by Otodom id
+    (first source wins). A single bad location is warned and skipped."""
+    targets = _search_targets(args)
+    params = _build_params(args)
+    by_id: dict = {}
+    order: list = []
+    for path, source in targets:
+        try:
+            recs = _fetch_listings(path, params, args, source)
+        except OtodomError as e:  # one location failing shouldn't sink the run
+            print(f"[otodom] {source or path}: {e} — skipping", file=sys.stderr)
+            continue
+        for r in recs:
+            if r["id"] not in by_id:  # keep first occurrence (+ its source tag)
+                by_id[r["id"]] = r
+                order.append(r["id"])
+    if not by_id:
+        raise OtodomError("no listings found across all locations")
+    return [by_id[i] for i in order]
 
 
 def main(argv=None):
@@ -299,8 +340,10 @@ def main(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("search", help="search listings and emit JSON")
-    s.add_argument("--location", help='free-text place, resolved via autosuggest, '
-                   'e.g. "Ząbki" (alternative to --city/--province/--district)')
+    s.add_argument("--location", action="append", metavar="NAME",
+                   help='free-text place, resolved via autosuggest, e.g. "Ząbki" '
+                   '(repeatable — multiple are merged & deduped by id; '
+                   'alternative to --city/--province/--district)')
     s.add_argument("--city", help="city slug, e.g. warszawa, czestochowa")
     s.add_argument("--province", default="mazowieckie", help="voivodeship slug")
     s.add_argument("--district", help="optional district within the city")

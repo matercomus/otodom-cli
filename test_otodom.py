@@ -73,6 +73,49 @@ class _Resp:
         self.status_code, self.ok, self.url, self.content = status, status < 400, url, content
 
 
+def _stub_search(targets, data):
+    """Swap search()'s target/param/fetch helpers; returns a restore() callback."""
+    saved = (otodom._search_targets, otodom._build_params, otodom._fetch_listings)
+    otodom._search_targets = lambda args: targets
+    otodom._build_params = lambda args: {}
+
+    def fetch(path, params, args, source):
+        v = data[path]
+        if isinstance(v, Exception):
+            raise v
+        return v
+    otodom._fetch_listings = fetch
+    def restore():
+        otodom._search_targets, otodom._build_params, otodom._fetch_listings = saved
+    return restore
+
+
+def test_search_dedup_by_id():
+    # id 2 appears in both locations -> one row, first source (Ząbki) wins
+    restore = _stub_search(
+        [("p1", "Ząbki"), ("p2", "Wawer")],
+        {"p1": [{"id": 1, "source_location": "Ząbki"}, {"id": 2, "source_location": "Ząbki"}],
+         "p2": [{"id": 2, "source_location": "Wawer"}, {"id": 3, "source_location": "Wawer"}]})
+    try:
+        out = otodom.search(object())
+    finally:
+        restore()
+    assert [r["id"] for r in out] == [1, 2, 3]  # no duplicate id 2
+    assert next(r for r in out if r["id"] == 2)["source_location"] == "Ząbki"
+
+
+def test_search_skips_failed_location():
+    # one location errors -> warned & skipped, the other still returns
+    restore = _stub_search(
+        [("bad", "Nowhere"), ("p2", "Wawer")],
+        {"bad": OtodomError("404"), "p2": [{"id": 9, "source_location": "Wawer"}]})
+    try:
+        out = otodom.search(object())
+    finally:
+        restore()
+    assert [r["id"] for r in out] == [9]
+
+
 def test_fetch_page_404_is_clean():
     orig = otodom._get
     otodom._get = lambda url, params=None: _Resp(404, url=url)
@@ -92,5 +135,7 @@ if __name__ == "__main__":
     test_amenities()
     test_amenities_diacritic_stems()
     test_location_path()
+    test_search_dedup_by_id()
+    test_search_skips_failed_location()
     test_fetch_page_404_is_clean()
     print("ok")
