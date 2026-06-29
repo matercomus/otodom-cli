@@ -102,6 +102,33 @@ def test_meta_payload_shape():
     assert m["resolved_url"].startswith("https://x/path?") and "limit=72" in m["resolved_url"]
 
 
+def test_persist_upsert_and_rank():
+    import os
+    import sqlite3
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)  # let store create it fresh
+    recs = [
+        {"id": 1, "rooms": 3, "has_bathtub": True, "has_garden": False,
+         "source_location": "Ząbki", "price": 300000},
+        {"id": 2, "rooms": 2, "has_bathtub": False, "has_garden": True,
+         "source_location": "Wawer", "price": 250000},
+    ]
+    otodom.persist(recs, path)
+    otodom.persist(recs, path)  # second run must be idempotent
+    con = sqlite3.connect(path)
+    n = con.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+    top = con.execute(
+        "SELECT id, bathtub, garden, area_tag FROM listings "
+        "ORDER BY prefs_score DESC").fetchall()
+    con.close()
+    os.remove(path)
+    assert n == 2  # 2 ids despite ingesting 4 records (UPSERT by id)
+    # adapter mapped bools->yes/no and source_location->area_tag; id 1 ranks first
+    assert top[0] == (1, "yes", "no", "Ząbki")
+
+
 def _stub_search(targets, data):
     """Swap search()'s target/param/fetch helpers; returns a restore() callback."""
     saved = (otodom._search_targets, otodom._build_params, otodom._fetch_listings)
@@ -166,6 +193,7 @@ if __name__ == "__main__":
     test_location_path()
     test_rooms_enum()
     test_meta_payload_shape()
+    test_persist_upsert_and_rank()
     test_search_dedup_by_id()
     test_search_skips_failed_location()
     test_fetch_page_404_is_clean()
