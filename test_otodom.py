@@ -73,6 +73,35 @@ class _Resp:
         self.status_code, self.ok, self.url, self.content = status, status < 400, url, content
 
 
+def test_rooms_enum():
+    from otodom import _rooms_enum
+    assert _rooms_enum("3") == "[THREE]"
+    assert _rooms_enum("3-4") == "[THREE,FOUR]"
+    assert _rooms_enum("3,4") == "[THREE,FOUR]"
+    for bad in ("0", "11", "abc", "4-2"):  # out of range / non-numeric / empty range
+        try:
+            _rooms_enum(bad)
+            assert False, bad
+        except OtodomError:
+            pass
+
+
+def test_meta_payload_shape():
+    import types
+    saved = (otodom._search_targets, otodom.fetch_page)
+    otodom._search_targets = lambda a: [("https://x/path", "Ząbki")]
+    otodom.fetch_page = lambda path, params: {"pagination": {"totalItems": 292, "totalPages": 5}}
+    a = types.SimpleNamespace(min=None, max=None, rooms=None, radius=None,
+                              area_min=None, area_max=None, extras=None, query=None, delay=0)
+    try:
+        out = otodom.meta(a)
+    finally:
+        otodom._search_targets, otodom.fetch_page = saved
+    m = out[0]
+    assert m["total_items"] == 292 and m["total_pages"] == 5
+    assert m["resolved_url"].startswith("https://x/path?") and "limit=72" in m["resolved_url"]
+
+
 def _stub_search(targets, data):
     """Swap search()'s target/param/fetch helpers; returns a restore() callback."""
     saved = (otodom._search_targets, otodom._build_params, otodom._fetch_listings)
@@ -135,6 +164,8 @@ if __name__ == "__main__":
     test_amenities()
     test_amenities_diacritic_stems()
     test_location_path()
+    test_rooms_enum()
+    test_meta_payload_shape()
     test_search_dedup_by_id()
     test_search_skips_failed_location()
     test_fetch_page_404_is_clean()

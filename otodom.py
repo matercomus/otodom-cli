@@ -272,17 +272,45 @@ def _search_targets(args) -> list:
     raise OtodomError("search needs --location NAME or --city CITY")
 
 
+def _rooms_enum(spec: str) -> str:
+    """'3' -> [THREE], '3-4' -> [THREE,FOUR], '3,4' -> [THREE,FOUR]."""
+    spec = spec.strip()
+    try:
+        if "-" in spec:
+            a, b = (int(x) for x in spec.split("-", 1))
+            nums = range(a, b + 1)
+        else:
+            nums = [int(x) for x in spec.split(",")]
+        nums = list(nums)
+        if not nums:
+            raise ValueError
+    except ValueError:
+        raise OtodomError(f"invalid --rooms {spec!r} (use e.g. 3, 3-4, or 3,4)")
+    words = {v: k for k, v in ROOMS.items()}
+    bad = [n for n in nums if n not in words]
+    if bad:
+        raise OtodomError(f"--rooms out of range {bad} (valid: 1-10)")
+    return "[" + ",".join(words[n] for n in nums) + "]"
+
+
 def _build_params(args) -> dict:
     params: dict = {"limit": 72}
     if args.min is not None:
         params["priceMin"] = args.min
     if args.max is not None:
         params["priceMax"] = args.max
-    if args.rooms is not None:
-        # Otodom expects the worded enum, e.g. roomsNumber=[THREE]
-        words = {v: k for k, v in ROOMS.items()}
-        params["roomsNumber"] = f"[{words.get(args.rooms, args.rooms)}]"
-    for kv in args.query or []:
+    if getattr(args, "rooms", None):
+        params["roomsNumber"] = _rooms_enum(args.rooms)
+    if getattr(args, "radius", None) is not None:
+        params["distanceRadius"] = args.radius
+    if getattr(args, "area_min", None) is not None:
+        params["areaMin"] = args.area_min
+    if getattr(args, "area_max", None) is not None:
+        params["areaMax"] = args.area_max
+    if getattr(args, "extras", None):
+        params["extras"] = "[" + ",".join(
+            e.strip().upper() for e in args.extras.split(",")) + "]"
+    for kv in args.query or []:  # raw escape hatch — wins on conflict
         k, _, v = kv.partition("=")
         params[k] = v
     return params
@@ -295,7 +323,11 @@ def _fetch_listings(path, params, args, source) -> list:
     if not total_items:
         raise OtodomError(f"0 listings match this search: {path}")
     total_pages = (first.get("pagination") or {}).get("totalPages", 1)
-    pages = min(total_pages, args.pages)
+    pages = total_pages if getattr(args, "all", False) else min(total_pages, args.pages)
+    if getattr(args, "radius", None) and total_items > 1000:
+        # ponytail: flat threshold, no baseline fetch. e.g. Ząbki radius 5 -> ~1745
+        print(f"[otodom] WARNING: --radius {args.radius} inflated to {total_items} "
+              f"results — likely swallowing neighbouring areas", file=sys.stderr)
     print(f"[otodom] {source or path}: {total_items} listings, "
           f"{total_pages} pages; fetching {pages}", file=sys.stderr)
     items = list(first.get("items") or [])
@@ -335,6 +367,24 @@ def search(args) -> list:
     return [by_id[i] for i in order]
 
 
+def meta(args) -> list:
+    """Machine-readable run metadata per target (no listing scrape): one object
+    each with total_items, total_pages and the resolved_url."""
+    params = _build_params(args)
+    out = []
+    for i, (path, source) in enumerate(_search_targets(args)):
+        if i:
+            time.sleep(args.delay)
+        pag = (fetch_page(path, params).get("pagination") or {})
+        out.append({
+            "source": source,
+            "total_items": pag.get("totalItems"),
+            "total_pages": pag.get("totalPages"),
+            "resolved_url": requests.Request("GET", path, params=params).prepare().url,
+        })
+    return out
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="otodom", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -351,8 +401,16 @@ def main(argv=None):
     s.add_argument("--property-type", choices=PROPERTY_TYPES, default="flat")
     s.add_argument("--min", type=int, help="min price")
     s.add_argument("--max", type=int, help="max price")
-    s.add_argument("--rooms", type=int, help="exact number of rooms")
+    s.add_argument("--rooms", help="rooms count or range, e.g. 3, 3-4, or 3,4")
+    s.add_argument("--radius", type=int, metavar="KM",
+                   help="distanceRadius — also pulls in neighbouring areas")
+    s.add_argument("--area-min", type=int, help="min area m²")
+    s.add_argument("--area-max", type=int, help="max area m²")
+    s.add_argument("--extras", help="comma-separated extras, e.g. garden,terrace")
     s.add_argument("--pages", type=int, default=3, help="max pages to fetch (72/page)")
+    s.add_argument("--all", action="store_true", help="fetch every page (ignores --pages)")
+    s.add_argument("--meta", action="store_true",
+                   help="emit run metadata (total_items/total_pages/resolved_url) as JSON, no scrape")
     s.add_argument("--delay", type=float, default=0.5, help="seconds between pages")
     s.add_argument("--query", action="append", metavar="KEY=VAL",
                    help="extra raw Otodom query params (repeatable), e.g. areaMin=40")
@@ -373,6 +431,8 @@ def main(argv=None):
 
     cmds = {"search": search, "details": details,
             "locations": lambda a: resolve_location(a.name)}
+    if args.cmd == "search" and args.meta:
+        cmds["search"] = meta
     try:
         results = cmds[args.cmd](args)
     except OtodomError as e:  # one clean stderr line, nonzero exit, no traceback
