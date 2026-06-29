@@ -55,6 +55,19 @@ def test_amenities_diacritic_stems():
     assert amenities([], "ogród z tarasem")[1] is True  # ogród -> ogrod
 
 
+def test_location_path():
+    from otodom import _location_path
+    # town: name, powiat, region -> region/powiat/city/city (gmina = city slug)
+    assert _location_path("Ząbki, wołomiński, mazowieckie", "CITY") == \
+        "mazowieckie/wolominski/zabki/zabki"
+    # county-rights city: name, region -> region/city/city/city
+    assert _location_path("Warszawa, mazowieckie", "CITY") == \
+        "mazowieckie/warszawa/warszawa/warszawa"
+    # district: name, city, region -> region/city/city/city/district
+    assert _location_path("Wawer, Warszawa, mazowieckie", "DISTRICT") == \
+        "mazowieckie/warszawa/warszawa/warszawa/wawer"
+
+
 class _Resp:
     def __init__(self, status, url="http://x", content=b""):
         self.status_code, self.ok, self.url, self.content = status, status < 400, url, content
@@ -78,5 +91,6 @@ if __name__ == "__main__":
     test_slugify()
     test_amenities()
     test_amenities_diacritic_stems()
+    test_location_path()
     test_fetch_page_404_is_clean()
     print("ok")

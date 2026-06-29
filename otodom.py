@@ -73,6 +73,41 @@ def slugify(text: str) -> str:
     return text.strip().lower().translate(PL_CHARS).replace(" ", "-")
 
 
+AUTOSUGGEST = f"{BASE}/ajax/geo6/autosuggest/"
+
+
+def _location_path(text: str, level: str) -> str:
+    """Build the canonical Otodom slug path from an autosuggest breadcrumb.
+
+    Breadcrumb `text` runs specific->broad ("Ząbki, wołomiński, mazowieckie").
+    Otodom's URL is province/powiat/gmina/city[/district]; the breadcrumb omits
+    the gmina, which we synthesise as the city slug — verified working for towns
+    (Ząbki), county-rights cities (Warszawa) and big-city districts (Wawer)."""
+    p = [slugify(x) for x in text.split(",")]
+    if level == "DISTRICT" and len(p) >= 3:  # name, city, region
+        return f"{p[-1]}/{p[1]}/{p[1]}/{p[1]}/{p[0]}"
+    if level == "CITY" and len(p) == 2:  # county-rights city: name, region
+        return f"{p[-1]}/{p[0]}/{p[0]}/{p[0]}"
+    if level == "CITY" and len(p) >= 3:  # town: name, powiat, region
+        return f"{p[-1]}/{p[1]}/{p[0]}/{p[0]}"
+    if level == "SUBREGION" and len(p) >= 2:  # powiat: name, region
+        return f"{p[-1]}/{p[0]}"
+    return "/".join(reversed(p))  # ponytail: REGION/unknown — best-effort, may 404
+
+
+def resolve_location(name: str) -> list:
+    """Resolve a free-text place name to ranked candidates via Otodom's live
+    autosuggest, each carrying the canonical search slug `path` + a `level`
+    type so an agent can disambiguate (e.g. Wawer district vs same-named towns)."""
+    r = _get(AUTOSUGGEST, {"data": name})
+    if not r.ok:
+        raise OtodomError(f"location lookup failed (HTTP {r.status_code}) for {name!r}")
+    return [{"label": c.get("text"), "level": c.get("level"), "name": c.get("name"),
+             "path": _location_path(c.get("text") or "", c.get("level") or ""),
+             "id": c.get("id")}
+            for c in r.json()]
+
+
 def _money(m):
     return m.get("value") if isinstance(m, dict) else None
 
@@ -208,11 +243,24 @@ def fetch_page(url: str, params: dict) -> dict:
 
 
 def search(args) -> list:
+    if getattr(args, "location", None):
+        cands = resolve_location(args.location)
+        if not cands:
+            raise OtodomError(f"no location match for {args.location!r}")
+        chosen = cands[0]  # autosuggest ranks best first
+        if len(cands) > 1:
+            print(f"[otodom] {args.location!r} -> {chosen['label']} ({chosen['level']}); "
+                  f"{len(cands) - 1} other matches — run `locations` to disambiguate",
+                  file=sys.stderr)
+        loc = chosen["path"]
+    elif args.city:
+        loc = f"{slugify(args.province)}/{slugify(args.city)}"
+        if args.district:
+            loc += f"/{slugify(args.district)}"
+    else:
+        raise OtodomError("search needs --location NAME or --city CITY")
     path = (f"{BASE}/pl/wyniki/{TRANSACTIONS[args.transaction]}/"
-            f"{PROPERTY_TYPES[args.property_type]}/{slugify(args.province)}/"
-            f"{slugify(args.city)}")
-    if args.district:
-        path += f"/{slugify(args.district)}"
+            f"{PROPERTY_TYPES[args.property_type]}/{loc}")
 
     params: dict = {"limit": 72}
     if args.min is not None:
@@ -251,7 +299,9 @@ def main(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("search", help="search listings and emit JSON")
-    s.add_argument("--city", required=True, help="e.g. warszawa, czestochowa")
+    s.add_argument("--location", help='free-text place, resolved via autosuggest, '
+                   'e.g. "Ząbki" (alternative to --city/--province/--district)')
+    s.add_argument("--city", help="city slug, e.g. warszawa, czestochowa")
     s.add_argument("--province", default="mazowieckie", help="voivodeship slug")
     s.add_argument("--district", help="optional district within the city")
     s.add_argument("--transaction", choices=TRANSACTIONS, default="sale")
@@ -272,15 +322,21 @@ def main(argv=None):
     d.add_argument("--delay", type=float, default=0.5, help="seconds between ads")
     d.add_argument("-o", "--output", help="write JSON here instead of stdout")
     d.add_argument("--pretty", action="store_true", help="indent JSON output")
+
+    loc = sub.add_parser("locations", help="resolve a place name to candidate slug paths")
+    loc.add_argument("name", help='free-text place name, e.g. "Ząbki"')
+    loc.add_argument("--pretty", action="store_true", help="indent JSON output")
     args = p.parse_args(argv)
 
+    cmds = {"search": search, "details": details,
+            "locations": lambda a: resolve_location(a.name)}
     try:
-        results = search(args) if args.cmd == "search" else details(args)
+        results = cmds[args.cmd](args)
     except OtodomError as e:  # one clean stderr line, nonzero exit, no traceback
         print(f"[otodom] error: {e}", file=sys.stderr)
         sys.exit(2)
     out = json.dumps(results, ensure_ascii=False, indent=2 if args.pretty else None)
-    if args.output:
+    if getattr(args, "output", None):
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(out)
         print(f"[otodom] wrote {len(results)} listings to {args.output}", file=sys.stderr)
