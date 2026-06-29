@@ -1,5 +1,6 @@
 """Self-check for the parser. Run: uv run test_otodom.py  (or: pytest)"""
-from otodom import amenities, parse_item, slugify
+import otodom
+from otodom import OtodomError, amenities, parse_item, slugify
 
 SAMPLE = {
     "id": 1, "title": "Nice flat", "slug": "nice-flat-ID4BXrz",
@@ -47,9 +48,35 @@ def test_amenities():
     assert amenities([], "kabina prysznicowa") == (False, False)  # no tub, no garden
 
 
+def test_amenities_diacritic_stems():
+    # the real wanną ∌ wanna bug: declensions + diacritics must still match
+    for desc in ("wygodna wanna", "wanną narożną", "w łazience wannie", "WANNĄ"):
+        assert amenities([], desc)[0] is True, desc
+    assert amenities([], "ogród z tarasem")[1] is True  # ogród -> ogrod
+
+
+class _Resp:
+    def __init__(self, status, url="http://x", content=b""):
+        self.status_code, self.ok, self.url, self.content = status, status < 400, url, content
+
+
+def test_fetch_page_404_is_clean():
+    orig = otodom._get
+    otodom._get = lambda url, params=None: _Resp(404, url=url)
+    try:
+        otodom.fetch_page("http://x/badpath", {})
+        assert False, "expected OtodomError"
+    except OtodomError as e:
+        assert "404" in str(e) and "badpath" in str(e)
+    finally:
+        otodom._get = orig
+
+
 if __name__ == "__main__":
     test_parse_item()
     test_parse_handles_missing_fields()
     test_slugify()
     test_amenities()
+    test_amenities_diacritic_stems()
+    test_fetch_page_404_is_clean()
     print("ok")
