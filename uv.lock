@@ -75,7 +75,7 @@ wheels = [
 ]
 
 [[package]]
-name = "otodom-scraper"
+name = "otodom-cli"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
