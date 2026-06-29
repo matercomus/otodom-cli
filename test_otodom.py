@@ -1,5 +1,5 @@
 """Self-check for the parser. Run: uv run test_otodom.py  (or: pytest)"""
-from otodom import parse_item, slugify
+from otodom import amenities, parse_item, slugify
 
 SAMPLE = {
     "id": 1, "title": "Nice flat", "slug": "nice-flat-ID4BXrz",
@@ -40,8 +40,16 @@ def test_slugify():
     assert slugify("Warmińsko Mazurskie") == "warminsko-mazurskie"
 
 
+def test_amenities():
+    assert amenities([], "Łazienka z wanną i prysznicem") == (True, False)
+    assert amenities(["garden", "garage"], "duży salon") == (False, True)
+    assert amenities([], "do mieszkania należy ogródek") == (False, True)
+    assert amenities([], "kabina prysznicowa") == (False, False)  # no tub, no garden
+
+
 if __name__ == "__main__":
     test_parse_item()
     test_parse_handles_missing_fields()
     test_slugify()
+    test_amenities()
     print("ok")
