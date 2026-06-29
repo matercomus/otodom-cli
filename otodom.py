@@ -15,9 +15,32 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import dataclass
 
 import requests
 from bs4 import BeautifulSoup
+
+
+@dataclass(frozen=True)
+class SearchCriteria:
+    transaction: str = "rent"
+    property_type: str = "flat"
+    locations: tuple = ()
+    city: str | None = None
+    province: str = "mazowieckie"
+    district: str | None = None
+    min: int | None = None
+    max: int | None = None
+    rooms: str | None = None
+    radius: int | None = None
+    area_min: int | None = None
+    area_max: int | None = None
+    extras: str | None = None
+    query: tuple = ()
+    pages: int = 3
+    all_pages: bool = False
+    delay: float = 0.5
+
 
 BASE = "https://www.otodom.pl"
 HEADERS = {
@@ -242,12 +265,12 @@ def fetch_page(url: str, params: dict) -> dict:
     return sa
 
 
-def _search_targets(args) -> list:
-    """Resolve CLI args to a list of (location_path, source_label) to fetch.
-    Multiple --location (repeatable) yield multiple targets; --city is one."""
-    prefix = (f"{BASE}/pl/wyniki/{TRANSACTIONS[args.transaction]}/"
-              f"{PROPERTY_TYPES[args.property_type]}/")
-    locations = getattr(args, "location", None) or []
+def _search_targets(c) -> list:
+    """Resolve criteria to a list of (location_path, source_label) to fetch.
+    Multiple locations yield multiple targets; --city is one."""
+    prefix = (f"{BASE}/pl/wyniki/{TRANSACTIONS[c.transaction]}/"
+              f"{PROPERTY_TYPES[c.property_type]}/")
+    locations = c.locations or []
     if locations:
         targets = []
         for name in locations:
@@ -264,10 +287,10 @@ def _search_targets(args) -> list:
         if not targets:
             raise OtodomError("no --location resolved to anything searchable")
         return targets
-    if args.city:
-        loc = f"{slugify(args.province)}/{slugify(args.city)}"
-        if args.district:
-            loc += f"/{slugify(args.district)}"
+    if c.city:
+        loc = f"{slugify(c.province)}/{slugify(c.city)}"
+        if c.district:
+            loc += f"/{slugify(c.district)}"
         return [(prefix + loc, None)]
     raise OtodomError("search needs --location NAME or --city CITY")
 
@@ -293,46 +316,46 @@ def _rooms_enum(spec: str) -> str:
     return "[" + ",".join(words[n] for n in nums) + "]"
 
 
-def _build_params(args) -> dict:
+def _build_params(c) -> dict:
     params: dict = {"limit": 72}
-    if args.min is not None:
-        params["priceMin"] = args.min
-    if args.max is not None:
-        params["priceMax"] = args.max
-    if getattr(args, "rooms", None):
-        params["roomsNumber"] = _rooms_enum(args.rooms)
-    if getattr(args, "radius", None) is not None:
-        params["distanceRadius"] = args.radius
-    if getattr(args, "area_min", None) is not None:
-        params["areaMin"] = args.area_min
-    if getattr(args, "area_max", None) is not None:
-        params["areaMax"] = args.area_max
-    if getattr(args, "extras", None):
+    if c.min is not None:
+        params["priceMin"] = c.min
+    if c.max is not None:
+        params["priceMax"] = c.max
+    if c.rooms:
+        params["roomsNumber"] = _rooms_enum(c.rooms)
+    if c.radius is not None:
+        params["distanceRadius"] = c.radius
+    if c.area_min is not None:
+        params["areaMin"] = c.area_min
+    if c.area_max is not None:
+        params["areaMax"] = c.area_max
+    if c.extras:
         params["extras"] = "[" + ",".join(
-            e.strip().upper() for e in args.extras.split(",")) + "]"
-    for kv in args.query or []:  # raw escape hatch — wins on conflict
+            e.strip().upper() for e in c.extras.split(",")) + "]"
+    for kv in c.query or []:  # raw escape hatch — wins on conflict
         k, _, v = kv.partition("=")
         params[k] = v
     return params
 
 
-def _fetch_listings(path, params, args, source) -> list:
-    """Fetch up to args.pages of one location's listings, tagged with source."""
+def _fetch_listings(path, params, c, source) -> list:
+    """Fetch up to c.pages of one location's listings, tagged with source."""
     first = fetch_page(path, params)
     total_items = (first.get("pagination") or {}).get("totalItems", 0)
     if not total_items:
         raise OtodomError(f"0 listings match this search: {path}")
     total_pages = (first.get("pagination") or {}).get("totalPages", 1)
-    pages = total_pages if getattr(args, "all", False) else min(total_pages, args.pages)
-    if getattr(args, "radius", None) and total_items > 1000:
+    pages = total_pages if c.all_pages else min(total_pages, c.pages)
+    if c.radius and total_items > 1000:
         # ponytail: flat threshold, no baseline fetch. e.g. Ząbki radius 5 -> ~1745
-        print(f"[otodom] WARNING: --radius {args.radius} inflated to {total_items} "
+        print(f"[otodom] WARNING: --radius {c.radius} inflated to {total_items} "
               f"results — likely swallowing neighbouring areas", file=sys.stderr)
     print(f"[otodom] {source or path}: {total_items} listings, "
           f"{total_pages} pages; fetching {pages}", file=sys.stderr)
     items = list(first.get("items") or [])
     for page in range(2, pages + 1):
-        time.sleep(args.delay)
+        time.sleep(c.delay)
         sa = fetch_page(path, {**params, "page": page})
         items += sa.get("items") or []
         print(f"[otodom] page {page}/{pages} ({len(items)} so far)", file=sys.stderr)
@@ -345,16 +368,16 @@ def _fetch_listings(path, params, args, source) -> list:
     return recs
 
 
-def search(args) -> list:
+def search(c) -> list:
     """Fetch every target location, merge into one array deduped by Otodom id
     (first source wins). A single bad location is warned and skipped."""
-    targets = _search_targets(args)
-    params = _build_params(args)
+    targets = _search_targets(c)
+    params = _build_params(c)
     by_id: dict = {}
     order: list = []
     for path, source in targets:
         try:
-            recs = _fetch_listings(path, params, args, source)
+            recs = _fetch_listings(path, params, c, source)
         except OtodomError as e:  # one location failing shouldn't sink the run
             print(f"[otodom] {source or path}: {e} — skipping", file=sys.stderr)
             continue
@@ -367,14 +390,14 @@ def search(args) -> list:
     return [by_id[i] for i in order]
 
 
-def meta(args) -> list:
+def meta(c) -> list:
     """Machine-readable run metadata per target (no listing scrape): one object
     each with total_items, total_pages and the resolved_url."""
-    params = _build_params(args)
+    params = _build_params(c)
     out = []
-    for i, (path, source) in enumerate(_search_targets(args)):
+    for i, (path, source) in enumerate(_search_targets(c)):
         if i:
-            time.sleep(args.delay)
+            time.sleep(c.delay)
         pag = (fetch_page(path, params).get("pagination") or {})
         out.append({
             "source": source,
@@ -453,10 +476,20 @@ def main(argv=None):
 
     cmds = {"search": search, "details": details,
             "locations": lambda a: resolve_location(a.name)}
-    if args.cmd == "search" and args.meta:
-        cmds["search"] = meta
+    arg = args
+    if args.cmd == "search":
+        arg = SearchCriteria(
+            transaction=args.transaction, property_type=args.property_type,
+            locations=tuple(args.location or ()), city=args.city,
+            province=args.province, district=args.district, min=args.min,
+            max=args.max, rooms=args.rooms, radius=args.radius,
+            area_min=args.area_min, area_max=args.area_max, extras=args.extras,
+            query=tuple(args.query or ()), pages=args.pages, all_pages=args.all,
+            delay=args.delay)
+        if args.meta:
+            cmds["search"] = meta
     try:
-        results = cmds[args.cmd](args)
+        results = cmds[args.cmd](arg)
     except OtodomError as e:  # one clean stderr line, nonzero exit, no traceback
         print(f"[otodom] error: {e}", file=sys.stderr)
         sys.exit(2)

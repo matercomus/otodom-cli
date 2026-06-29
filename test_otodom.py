@@ -87,12 +87,11 @@ def test_rooms_enum():
 
 
 def test_meta_payload_shape():
-    import types
+    from otodom import SearchCriteria
     saved = (otodom._search_targets, otodom.fetch_page)
     otodom._search_targets = lambda a: [("https://x/path", "Ząbki")]
     otodom.fetch_page = lambda path, params: {"pagination": {"totalItems": 292, "totalPages": 5}}
-    a = types.SimpleNamespace(min=None, max=None, rooms=None, radius=None,
-                              area_min=None, area_max=None, extras=None, query=None, delay=0)
+    a = SearchCriteria(delay=0)
     try:
         out = otodom.meta(a)
     finally:
@@ -135,7 +134,7 @@ def _stub_search(targets, data):
     otodom._search_targets = lambda args: targets
     otodom._build_params = lambda args: {}
 
-    def fetch(path, params, args, source):
+    def fetch(path, params, c, source):
         v = data[path]
         if isinstance(v, Exception):
             raise v
@@ -153,7 +152,7 @@ def test_search_dedup_by_id():
         {"p1": [{"id": 1, "source_location": "Ząbki"}, {"id": 2, "source_location": "Ząbki"}],
          "p2": [{"id": 2, "source_location": "Wawer"}, {"id": 3, "source_location": "Wawer"}]})
     try:
-        out = otodom.search(object())
+        out = otodom.search(otodom.SearchCriteria())
     finally:
         restore()
     assert [r["id"] for r in out] == [1, 2, 3]  # no duplicate id 2
@@ -166,7 +165,7 @@ def test_search_skips_failed_location():
         [("bad", "Nowhere"), ("p2", "Wawer")],
         {"bad": OtodomError("404"), "p2": [{"id": 9, "source_location": "Wawer"}]})
     try:
-        out = otodom.search(object())
+        out = otodom.search(otodom.SearchCriteria())
     finally:
         restore()
     assert [r["id"] for r in out] == [9]
