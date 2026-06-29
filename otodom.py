@@ -26,6 +26,29 @@ HEADERS = {
         "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     )
 }
+RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+class OtodomError(Exception):
+    """A clean, agent-readable failure — printed as one stderr line, no traceback."""
+
+
+def _get(url, params=None, tries=4, backoff=1.0):
+    """GET with bounded exponential backoff on 429/5xx and connection errors.
+    Returns the final Response; raises OtodomError if every attempt fails."""
+    last = None
+    for attempt in range(tries):
+        try:
+            r = requests.get(url, params=params, headers=HEADERS, timeout=30)
+        except requests.RequestException as e:  # connection reset/timeout
+            last = e
+        else:
+            if r.status_code not in RETRY_STATUS:
+                return r
+            last = OtodomError(f"HTTP {r.status_code} from {r.url}")
+        if attempt < tries - 1:
+            time.sleep(backoff * 2 ** attempt)
+    raise OtodomError(f"giving up after {tries} tries: {url} ({last})")
 
 # English CLI value -> Otodom URL slug (Polish)
 TRANSACTIONS = {"sale": "sprzedaz", "rent": "wynajem"}
@@ -101,10 +124,11 @@ def _first(v):
 def amenities(extras: list, desc: str) -> tuple:
     """(has_bathtub, has_garden). Bathtub lives only in free text (`wanna`);
     garden is a reliable extras slug but also turns up in the description."""
-    dl = (desc or "").lower()
-    # match Polish stems, not exact words: wanna/wanną/wannie…, ogród/ogrodu/ogródek…
+    # Fold case + diacritics so stems match every declension: wanna/wanną/wannie,
+    # ogród/ogrodu/ogródek. PL_CHARS maps ó->o, ą->a, etc.
+    dl = (desc or "").lower().translate(PL_CHARS)
     has_bathtub = "wann" in dl
-    has_garden = ("garden" in (extras or [])) or "ogród" in dl or "ogrod" in dl
+    has_garden = ("garden" in (extras or [])) or "ogrod" in dl
     return has_bathtub, has_garden
 
 
@@ -114,12 +138,15 @@ def fetch_ad(url: str) -> dict:
     Search JSON lacks extras and free text, so this fetches the ad's own
     `__NEXT_DATA__` (props.pageProps.ad) for `target` + `description`.
     """
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
+    r = _get(url)
+    if r.status_code == 404:
+        raise OtodomError(f"ad not found (404): {r.url}")
+    if not r.ok:
+        raise OtodomError(f"HTTP {r.status_code} fetching ad: {r.url}")
     soup = BeautifulSoup(r.content, "html.parser")
     tag = soup.find("script", {"id": "__NEXT_DATA__"})
     if tag is None:
-        raise RuntimeError(f"No __NEXT_DATA__ on ad page: {r.url}")
+        raise OtodomError(f"blocked or layout changed (no __NEXT_DATA__): {r.url}")
     ad = json.loads(tag.text)["props"]["pageProps"].get("ad") or {}
     t = ad.get("target") or {}
     extras = t.get("Extras_types") or []
@@ -164,16 +191,19 @@ def details(args) -> list:
 
 def fetch_page(url: str, params: dict) -> dict:
     """Fetch a search page and return its parsed searchAds block."""
-    r = requests.get(url, params=params, headers=HEADERS, timeout=30)
-    r.raise_for_status()
+    r = _get(url, params)
+    if r.status_code == 404:
+        raise OtodomError(f"location not found (404) — check the path: {r.url}")
+    if not r.ok:
+        raise OtodomError(f"HTTP {r.status_code} fetching search: {r.url}")
     soup = BeautifulSoup(r.content, "html.parser")
     tag = soup.find("script", {"id": "__NEXT_DATA__"})
     if tag is None:
-        raise RuntimeError(f"No __NEXT_DATA__ on page (blocked or layout changed): {r.url}")
+        raise OtodomError(f"blocked or layout changed (no __NEXT_DATA__): {r.url}")
     data = json.loads(tag.text)["props"]["pageProps"].get("data") or {}
     sa = data.get("searchAds")
     if sa is None:
-        raise RuntimeError(f"No searchAds in page data (no results?): {r.url}")
+        raise OtodomError(f"no results for this search: {r.url}")
     return sa
 
 
@@ -198,9 +228,12 @@ def search(args) -> list:
         params[k] = v
 
     first = fetch_page(path, params)
+    total_items = (first.get("pagination") or {}).get("totalItems", 0)
+    if not total_items:
+        raise OtodomError(f"0 listings match this search: {path}")
     total_pages = (first.get("pagination") or {}).get("totalPages", 1)
     pages = min(total_pages, args.pages)
-    print(f"[otodom] {first['pagination']['totalItems']} listings, "
+    print(f"[otodom] {total_items} listings, "
           f"{total_pages} pages; fetching {pages}", file=sys.stderr)
 
     items = list(first.get("items") or [])
@@ -241,7 +274,11 @@ def main(argv=None):
     d.add_argument("--pretty", action="store_true", help="indent JSON output")
     args = p.parse_args(argv)
 
-    results = search(args) if args.cmd == "search" else details(args)
+    try:
+        results = search(args) if args.cmd == "search" else details(args)
+    except OtodomError as e:  # one clean stderr line, nonzero exit, no traceback
+        print(f"[otodom] error: {e}", file=sys.stderr)
+        sys.exit(2)
     out = json.dumps(results, ensure_ascii=False, indent=2 if args.pretty else None)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
