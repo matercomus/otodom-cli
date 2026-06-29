@@ -415,7 +415,7 @@ def main(argv=None):
     s.add_argument("--city", help="city slug, e.g. warszawa, czestochowa")
     s.add_argument("--province", default="mazowieckie", help="voivodeship slug")
     s.add_argument("--district", help="optional district within the city")
-    s.add_argument("--transaction", choices=TRANSACTIONS, default="sale")
+    s.add_argument("--transaction", choices=TRANSACTIONS, default="rent")
     s.add_argument("--property-type", choices=PROPERTY_TYPES, default="flat")
     s.add_argument("--min", type=int, help="min price")
     s.add_argument("--max", type=int, help="max price")
