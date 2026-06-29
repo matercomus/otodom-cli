@@ -1,0 +1,47 @@
+"""Self-check for the parser. Run: uv run test_otodom.py  (or: pytest)"""
+from otodom import parse_item, slugify
+
+SAMPLE = {
+    "id": 1, "title": "Nice flat", "slug": "nice-flat-ID4BXrz",
+    "totalPrice": {"value": 348000, "currency": "PLN"},
+    "rentPrice": {"value": 750, "currency": "PLN"},
+    "pricePerSquareMeter": {"value": 7404, "currency": "PLN"},
+    "areaInSquareMeters": 47, "roomsNumber": "THREE", "floorNumber": "NINTH",
+    "estate": "FLAT", "transaction": "SELL", "isPrivateOwner": False,
+    "isPromoted": False, "dateCreated": "2026-06-29 07:43:03",
+    "agency": {"name": "Some Agency"},
+    "location": {
+        "address": {"street": None, "city": {"name": "Częstochowa"},
+                    "province": {"name": "śląskie"}},
+        "reverseGeocoding": {"locations": [
+            {"locationLevel": "city_or_village", "name": "Częstochowa"},
+            {"locationLevel": "district", "name": "Trzech Wieszczów"}]},
+    },
+}
+
+
+def test_parse_item():
+    r = parse_item(SAMPLE)
+    assert r["url"] == "https://www.otodom.pl/pl/oferta/nice-flat-ID4BXrz"
+    assert r["price"] == 348000 and r["currency"] == "PLN"
+    assert r["rooms"] == 3  # worded enum -> int
+    assert r["district"] == "Trzech Wieszczów"
+    assert r["city"] == "Częstochowa"
+    assert r["agency"] == "Some Agency"
+
+
+def test_parse_handles_missing_fields():
+    r = parse_item({"id": 2, "slug": "x"})  # almost everything absent
+    assert r["price"] is None and r["rooms"] is None and r["district"] is None
+
+
+def test_slugify():
+    assert slugify("Częstochowa") == "czestochowa"
+    assert slugify("Warmińsko Mazurskie") == "warminsko-mazurskie"
+
+
+if __name__ == "__main__":
+    test_parse_item()
+    test_parse_handles_missing_fields()
+    test_slugify()
+    print("ok")
