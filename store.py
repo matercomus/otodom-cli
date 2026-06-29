@@ -43,11 +43,21 @@ def score(r: dict) -> int:
     return s
 
 
-def ingest(records: list, area_by_id: dict):
-    con = sqlite3.connect(DB)
+def to_record(r: dict) -> dict:
+    """Map a search/details record onto store's schema: has_bathtub/has_garden
+    bools -> bathtub/garden yes/no/unknown strings. Idempotent (reads has_*)."""
+    def yn(key):
+        v = r.get(key)
+        return "yes" if v is True else "no" if v is False else "unknown"
+    return {**r, "bathtub": yn("has_bathtub"), "garden": yn("has_garden")}
+
+
+def ingest(records: list, area_by_id: dict, db_path=DB):
+    con = sqlite3.connect(db_path)
     con.execute(SCHEMA)
     rows = []
     for r in records:
+        r = to_record(r)
         r = {**r, "area_tag": area_by_id.get(r["id"]),
              "extras": json.dumps(r.get("extras") or [], ensure_ascii=False),
              "prefs_score": score(r)}
@@ -64,8 +74,8 @@ def ingest(records: list, area_by_id: dict):
     print(f"[store] upserted {len(rows)} listings ({n} row changes)", file=sys.stderr)
 
 
-def report(limit: int):
-    con = sqlite3.connect(DB)
+def report(limit: int, db_path=DB):
+    con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     rows = con.execute(
         "SELECT * FROM listings ORDER BY prefs_score DESC, rooms DESC, price ASC "
@@ -82,7 +92,6 @@ def report(limit: int):
 
 
 def main(argv=None):
-    global DB
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-i", "--input", help="enriched JSON (array or {records:[...]}); default stdin")
@@ -90,10 +99,9 @@ def main(argv=None):
     p.add_argument("--db", default=DB, help=f"SQLite store path (default {DB})")
     p.add_argument("--top", type=int, help="print markdown report of top N and exit")
     args = p.parse_args(argv)
-    DB = args.db  # ingest()/report() read this module global
 
     if not args.input:  # nothing to ingest -> report-only
-        report(args.top if args.top is not None else 20)
+        report(args.top if args.top is not None else 20, args.db)
         return
 
     raw = json.load(open(args.input))
@@ -102,9 +110,9 @@ def main(argv=None):
     if args.candidates:
         for c in json.load(open(args.candidates)):
             area_by_id[c["id"]] = c.get("area_tag")
-    ingest(records, area_by_id)
+    ingest(records, area_by_id, args.db)
     if args.top is not None:
-        report(args.top)
+        report(args.top, args.db)
 
 
 if __name__ == "__main__":

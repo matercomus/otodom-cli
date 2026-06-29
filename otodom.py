@@ -385,22 +385,12 @@ def meta(args) -> list:
     return out
 
 
-def _to_store_record(r: dict) -> dict:
-    """Map a search/details record onto store.py's schema: bathtub/garden as
-    yes/no/unknown strings, and #7's source_location -> area_tag."""
-    def yn(key):
-        v = r.get(key)
-        return "yes" if v is True else "no" if v is False else "unknown"
-    return {**r, "bathtub": yn("has_bathtub"), "garden": yn("has_garden")}
-
-
 def persist(records: list, db_path: str):
     """UPSERT records into the SQLite store by Otodom id (reuses store.ingest).
     Idempotent — re-running the same search updates rows in place."""
     import store
-    store.DB = db_path  # point the store at the chosen file
     area_by_id = {r["id"]: r.get("source_location") for r in records}
-    store.ingest([_to_store_record(r) for r in records], area_by_id)
+    store.ingest(records, area_by_id, db_path)
 
 
 def main(argv=None):
