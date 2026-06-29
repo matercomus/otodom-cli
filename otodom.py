@@ -88,6 +88,80 @@ def parse_item(it: dict) -> dict:
     }
 
 
+def _strip_html(html) -> str:
+    """Description comes as HTML; flatten to plain text for storage/keyword search."""
+    return BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
+
+
+def _first(v):
+    """target fields are often single-element lists; unwrap them."""
+    return v[0] if isinstance(v, list) and v else (None if isinstance(v, list) else v)
+
+
+def amenities(extras: list, desc: str) -> tuple:
+    """(has_bathtub, has_garden). Bathtub lives only in free text (`wanna`);
+    garden is a reliable extras slug but also turns up in the description."""
+    dl = (desc or "").lower()
+    # match Polish stems, not exact words: wanna/wanną/wannie…, ogród/ogrodu/ogródek…
+    has_bathtub = "wann" in dl
+    has_garden = ("garden" in (extras or [])) or "ogród" in dl or "ogrod" in dl
+    return has_bathtub, has_garden
+
+
+def fetch_ad(url: str) -> dict:
+    """Fetch one ad page and enrich it with bathtub/garden flags.
+
+    Search JSON lacks extras and free text, so this fetches the ad's own
+    `__NEXT_DATA__` (props.pageProps.ad) for `target` + `description`.
+    """
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.content, "html.parser")
+    tag = soup.find("script", {"id": "__NEXT_DATA__"})
+    if tag is None:
+        raise RuntimeError(f"No __NEXT_DATA__ on ad page: {r.url}")
+    ad = json.loads(tag.text)["props"]["pageProps"].get("ad") or {}
+    t = ad.get("target") or {}
+    extras = t.get("Extras_types") or []
+    desc = _strip_html(ad.get("description"))
+    has_bathtub, has_garden = amenities(extras, desc)
+    rooms = _first(t.get("Rooms_num"))
+    return {
+        "id": ad.get("id"),
+        "url": url,
+        "title": ad.get("title"),
+        "price": _first(t.get("Price")),
+        "rent": _first(t.get("Rent")),
+        "area_m2": t.get("Area"),
+        "rooms": int(rooms) if rooms and str(rooms).isdigit() else None,
+        "floor": _first(t.get("Floor_no")),
+        "city": t.get("City"),
+        "extras": extras,
+        "has_bathtub": has_bathtub,
+        "has_garden": has_garden,
+        "description": desc,
+    }
+
+
+def details(args) -> list:
+    urls = list(args.urls or [])
+    if args.input:
+        with open(args.input, encoding="utf-8") as f:
+            urls += [it["url"] for it in json.load(f) if it.get("url")]
+    if not urls and not sys.stdin.isatty():
+        urls += [it["url"] for it in json.load(sys.stdin) if it.get("url")]
+    out = []
+    for i, u in enumerate(urls):
+        if i:
+            time.sleep(args.delay)
+        try:
+            out.append(fetch_ad(u))
+            print(f"[otodom] ad {i + 1}/{len(urls)}", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 — one bad ad shouldn't sink the batch
+            print(f"[otodom] skip {u}: {e}", file=sys.stderr)
+    return out
+
+
 def fetch_page(url: str, params: dict) -> dict:
     """Fetch a search page and return its parsed searchAds block."""
     r = requests.get(url, params=params, headers=HEADERS, timeout=30)
@@ -158,9 +232,16 @@ def main(argv=None):
                    help="extra raw Otodom query params (repeatable), e.g. areaMin=40")
     s.add_argument("-o", "--output", help="write JSON here instead of stdout")
     s.add_argument("--pretty", action="store_true", help="indent JSON output")
+
+    d = sub.add_parser("details", help="enrich ad URLs with extras/bathtub/garden")
+    d.add_argument("urls", nargs="*", help="ad URLs (or pipe/-i a search JSON array)")
+    d.add_argument("-i", "--input", help="search JSON file to read URLs from")
+    d.add_argument("--delay", type=float, default=0.5, help="seconds between ads")
+    d.add_argument("-o", "--output", help="write JSON here instead of stdout")
+    d.add_argument("--pretty", action="store_true", help="indent JSON output")
     args = p.parse_args(argv)
 
-    results = search(args)
+    results = search(args) if args.cmd == "search" else details(args)
     out = json.dumps(results, ensure_ascii=False, indent=2 if args.pretty else None)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
