@@ -54,6 +54,19 @@ uv run otodom.py details -i listings.json -o enriched.json   # urls from a searc
 uv run otodom.py details https://www.otodom.pl/pl/oferta/...  # or pass URLs directly
 ```
 
+### Extracting coordinates (`location`)
+
+`location` pulls geo + address from a single ad URL. It walks the page's
+`__NEXT_DATA__` for the object holding `latitude`/`longitude` (no hard-coded key
+path — Otodom reshapes their schema) and the nearest address fields.
+
+```bash
+uv run otodom.py location https://www.otodom.pl/pl/oferta/...-ID4BSTV --pretty
+```
+
+`approximate` is `true` when the location carries a non-zero `radius`: the
+coordinates are a privacy-circle centre, not the exact address.
+
 ### Storing & ranking (`store.py`)
 
 `store.py` keeps enriched listings in a local SQLite DB (`listings.db`,
