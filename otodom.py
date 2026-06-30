@@ -281,6 +281,27 @@ def _name(v):
         v if isinstance(v, str) else None)
 
 
+# Otodom locationLevel -> our flat address field (same breadcrumb parse_item reads).
+_GEO_LEVELS = {"voivodeship": "region", "region": "region",
+               "city_or_village": "city", "city": "city", "district": "district"}
+
+
+def _geo_levels(data) -> dict:
+    """Ad pages leave address.{city,district,province} null and put the real
+    breadcrumb in a reverseGeocoding `locations` list keyed by locationLevel."""
+    out: dict = {}
+    for d in _walk(data):
+        locs = d.get("locations")
+        if isinstance(locs, list) and any(
+                isinstance(x, dict) and "locationLevel" in x for x in locs):
+            for loc in locs:
+                field = _GEO_LEVELS.get(loc.get("locationLevel"))
+                if field and loc.get("name"):
+                    out.setdefault(field, loc.get("name"))
+            break
+    return out
+
+
 def extract_location(html, url: str) -> dict:
     """Pull geo + address from one ad page's __NEXT_DATA__.
 
@@ -303,6 +324,7 @@ def extract_location(html, url: str) -> dict:
     addr = next((d for d in _walk(data)
                  if "latitude" not in d
                  and any(k in d for k in ("street", "city"))), {})
+    geo = _geo_levels(data)  # fallback when address.{city,district,province} are null
     return {
         "ad_id": ad_id_from_url(url),
         "url": url,
@@ -311,9 +333,9 @@ def extract_location(html, url: str) -> dict:
         "approximate": bool(radius),  # non-zero radius => privacy circle, not exact
         "radius": radius,
         "street": _name(addr.get("street")),
-        "city": _name(addr.get("city")),
-        "district": _name(addr.get("district")),
-        "region": _name(addr.get("province") or addr.get("region")),
+        "city": _name(addr.get("city")) or geo.get("city"),
+        "district": _name(addr.get("district")) or geo.get("district"),
+        "region": _name(addr.get("province") or addr.get("region")) or geo.get("region"),
     }
 
 

@@ -205,11 +205,16 @@ PRECISE_AD = {
         "coordinates": {"latitude": 50.8118, "longitude": 19.1203},
     },
 }
-# Approximate: privacy circle (radius 500m), no street, coords as strings.
+# Approximate: privacy circle (radius 500m). Real ad-page shape — address.* are
+# null and the breadcrumb lives in reverseGeocoding; coords arrive as strings.
 APPROX_AD = {
     "id": 1,
     "location": {
-        "address": {"city": {"name": "Warszawa"}, "province": {"name": "mazowieckie"}},
+        "address": {"street": None, "city": None, "district": None, "province": None},
+        "reverseGeocoding": {"locations": [
+            {"locationLevel": "voivodeship", "name": "mazowieckie"},
+            {"locationLevel": "city_or_village", "name": "Warszawa"},
+            {"locationLevel": "district", "name": "Praga-Południe"}]},
         "mapDetails": {"radius": 500, "zoom": 13},
         "coordinates": {"latitude": "52.2297", "longitude": "21.0122"},
     },
@@ -231,7 +236,10 @@ def test_extract_location_approximate():
                                 "https://www.otodom.pl/pl/oferta/x-ID9Z")
     assert r["approximate"] is True and r["radius"] == 500
     assert r["lat"] == 52.2297 and r["lng"] == 21.0122  # numeric strings coerced
-    assert r["city"] == "Warszawa" and r["street"] is None
+    assert r["street"] is None  # null in address, no fallback
+    # city/district/region fall back to reverseGeocoding breadcrumb
+    assert r["city"] == "Warszawa" and r["district"] == "Praga-Południe"
+    assert r["region"] == "mazowieckie"
     assert r["ad_id"] == "9Z"
 
 
