@@ -168,3 +168,5 @@ listings.db
 
 # local tooling / worktrees
 .claude/
+tmp/
+listings_viz.html
