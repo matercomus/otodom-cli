@@ -13,6 +13,7 @@ Output is a JSON array of listings on stdout (or --output file).
 """
 import argparse
 import json
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -47,7 +48,9 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-    )
+    ),
+    # Otodom blocks header-less requests; pl-PL also keeps the JSON locale stable.
+    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
 }
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
@@ -226,6 +229,125 @@ def fetch_ad(url: str) -> dict:
         "has_garden": has_garden,
         "description": desc,
     }
+
+
+def _next_data(html, url) -> dict:
+    """Parse a listing page's __NEXT_DATA__ blob. A blocked/challenge page has no
+    such tag, so a missing tag is reported as a block, not silently empty data."""
+    soup = BeautifulSoup(html, "html.parser")
+    tag = soup.find("script", {"id": "__NEXT_DATA__"})
+    if tag is None:
+        raise OtodomError(f"blocked or layout changed (no __NEXT_DATA__): {url}")
+    try:
+        return json.loads(tag.text)
+    except (ValueError, TypeError) as e:
+        raise OtodomError(f"unparseable __NEXT_DATA__ JSON: {url} ({e})")
+
+
+ID_RE = re.compile(r"-ID([A-Za-z0-9]+)")
+
+
+def ad_id_from_url(url: str):
+    """Otodom's public id is the `-ID<token>` suffix of the slug."""
+    m = ID_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def _walk(obj):
+    """Yield every dict nested anywhere in a parsed-JSON structure, top-down."""
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk(v)
+
+
+def _coerce(x):
+    """lat/lng/radius arrive as float, int or numeric string; bools aren't numbers."""
+    if isinstance(x, bool) or x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return x
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _name(v):
+    return (v.get("name") or v.get("label")) if isinstance(v, dict) else (
+        v if isinstance(v, str) else None)
+
+
+# Otodom locationLevel -> our flat address field (same breadcrumb parse_item reads).
+_GEO_LEVELS = {"voivodeship": "region", "region": "region",
+               "city_or_village": "city", "city": "city", "district": "district"}
+
+
+def _geo_levels(data) -> dict:
+    """Ad pages leave address.{city,district,province} null and put the real
+    breadcrumb in a reverseGeocoding `locations` list keyed by locationLevel."""
+    out: dict = {}
+    for d in _walk(data):
+        locs = d.get("locations")
+        if isinstance(locs, list) and any(
+                isinstance(x, dict) and "locationLevel" in x for x in locs):
+            for loc in locs:
+                field = _GEO_LEVELS.get(loc.get("locationLevel"))
+                if field and loc.get("name"):
+                    out.setdefault(field, loc.get("name"))
+            break
+    return out
+
+
+def extract_location(html, url: str) -> dict:
+    """Pull geo + address from one ad page's __NEXT_DATA__.
+
+    Otodom reshapes their schema, so rather than a fixed key path we walk the
+    JSON for the object carrying both `latitude` and `longitude`, the first
+    address-shaped object, and any `radius`/`mapRadius`. A non-zero radius means
+    the point is a privacy-circle centre, not the real address (`approximate`).
+    """
+    data = _next_data(html, url)
+    coords = next((d for d in _walk(data)
+                   if _coerce(d.get("latitude")) is not None
+                   and _coerce(d.get("longitude")) is not None), None)
+    if coords is None:
+        raise OtodomError(f"no coordinates found in listing JSON: {url}")
+    radius = next((_coerce(d[k]) for d in _walk(data)
+                   for k in ("radius", "mapRadius")
+                   if k in d and _coerce(d[k]) is not None), None)
+    # ponytail: first radius-shaped field wins — an ad page has one; scope to the
+    # location subtree only if unrelated radius fields ever appear.
+    addr = next((d for d in _walk(data)
+                 if "latitude" not in d
+                 and any(k in d for k in ("street", "city"))), {})
+    geo = _geo_levels(data)  # fallback when address.{city,district,province} are null
+    return {
+        "ad_id": ad_id_from_url(url),
+        "url": url,
+        "lat": _coerce(coords.get("latitude")),
+        "lng": _coerce(coords.get("longitude")),
+        "approximate": bool(radius),  # non-zero radius => privacy circle, not exact
+        "radius": radius,
+        "street": _name(addr.get("street")),
+        "city": _name(addr.get("city")) or geo.get("city"),
+        "district": _name(addr.get("district")) or geo.get("district"),
+        "region": _name(addr.get("province") or addr.get("region")) or geo.get("region"),
+    }
+
+
+def fetch_location(url: str) -> dict:
+    """Fetch one ad and extract its location. Single URL in, single dict out —
+    a future batch command can map this over many URLs."""
+    r = _get(url)
+    if r.status_code == 404:
+        raise OtodomError(f"ad not found (404): {r.url}")
+    if not r.ok:
+        raise OtodomError(f"HTTP {r.status_code} fetching ad: {r.url}")
+    return extract_location(r.content, url)
 
 
 def details(args) -> list:
@@ -462,10 +584,15 @@ def main(argv=None):
     loc = sub.add_parser("locations", help="resolve a place name to candidate slug paths")
     loc.add_argument("name", help='free-text place name, e.g. "Ząbki"')
     loc.add_argument("--pretty", action="store_true", help="indent JSON output")
+
+    g = sub.add_parser("location", help="extract geo + address from a single ad URL")
+    g.add_argument("url", help="Otodom listing URL, e.g. https://www.otodom.pl/pl/oferta/...-ID4BSTV")
+    g.add_argument("--pretty", action="store_true", help="indent JSON output")
     args = p.parse_args(argv)
 
     cmds = {"search": search, "details": details,
-            "locations": lambda a: resolve_location(a.name)}
+            "locations": lambda a: resolve_location(a.name),
+            "location": lambda a: fetch_location(a.url)}
     arg = args
     if args.cmd == "search":
         arg = SearchCriteria(

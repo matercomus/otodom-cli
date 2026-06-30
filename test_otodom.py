@@ -1,4 +1,6 @@
 """Self-check for the parser. Run: uv run test_otodom.py  (or: pytest)"""
+import json
+
 import otodom
 from otodom import OtodomError, amenities, parse_item, slugify
 
@@ -183,6 +185,91 @@ def test_fetch_page_404_is_clean():
         otodom._get = orig
 
 
+def _html(ad):
+    """Wrap an `ad` dict in a minimal page carrying it as __NEXT_DATA__ —
+    a saved fixture, so location tests never touch the live site."""
+    blob = json.dumps({"props": {"pageProps": {"ad": ad}}}, ensure_ascii=False)
+    return ('<html><body><script id="__NEXT_DATA__" type="application/json">'
+            f'{blob}</script></body></html>')
+
+
+# Precise: exact street address, radius 0 (mapDetails present).
+PRECISE_AD = {
+    "id": 64939319,
+    "location": {
+        "address": {"street": {"name": "Krakowska", "number": "10"},
+                    "city": {"name": "Częstochowa"},
+                    "district": {"name": "Śródmieście"},
+                    "province": {"name": "śląskie"}},
+        "mapDetails": {"radius": 0, "zoom": 16},
+        "coordinates": {"latitude": 50.8118, "longitude": 19.1203},
+    },
+}
+# Approximate: privacy circle (radius 500m). Real ad-page shape — address.* are
+# null and the breadcrumb lives in reverseGeocoding; coords arrive as strings.
+APPROX_AD = {
+    "id": 1,
+    "location": {
+        "address": {"street": None, "city": None, "district": None, "province": None},
+        "reverseGeocoding": {"locations": [
+            {"locationLevel": "voivodeship", "name": "mazowieckie"},
+            {"locationLevel": "city_or_village", "name": "Warszawa"},
+            {"locationLevel": "district", "name": "Praga-Południe"}]},
+        "mapDetails": {"radius": 500, "zoom": 13},
+        "coordinates": {"latitude": "52.2297", "longitude": "21.0122"},
+    },
+}
+
+
+def test_extract_location_precise():
+    r = otodom.extract_location(_html(PRECISE_AD),
+                                "https://www.otodom.pl/pl/oferta/nice-flat-ID4BSTV")
+    assert (r["lat"], r["lng"]) == (50.8118, 19.1203)
+    assert r["approximate"] is False and r["radius"] == 0
+    assert r["street"] == "Krakowska" and r["city"] == "Częstochowa"
+    assert r["district"] == "Śródmieście" and r["region"] == "śląskie"
+    assert r["ad_id"] == "4BSTV"
+
+
+def test_extract_location_approximate():
+    r = otodom.extract_location(_html(APPROX_AD),
+                                "https://www.otodom.pl/pl/oferta/x-ID9Z")
+    assert r["approximate"] is True and r["radius"] == 500
+    assert r["lat"] == 52.2297 and r["lng"] == 21.0122  # numeric strings coerced
+    assert r["street"] is None  # null in address, no fallback
+    # city/district/region fall back to reverseGeocoding breadcrumb
+    assert r["city"] == "Warszawa" and r["district"] == "Praga-Południe"
+    assert r["region"] == "mazowieckie"
+    assert r["ad_id"] == "9Z"
+
+
+def test_extract_location_no_coords():
+    ad = {"id": 1, "location": {"address": {"city": {"name": "X"}}}}
+    try:
+        otodom.extract_location(_html(ad), "u")
+        assert False, "expected OtodomError"
+    except OtodomError as e:
+        assert "no coordinates" in str(e)
+
+
+def test_extract_location_blocked():
+    # bot-challenge page: no __NEXT_DATA__ -> clear error, not empty data
+    try:
+        otodom.extract_location("<html><body>Access denied</body></html>", "u")
+        assert False, "expected OtodomError"
+    except OtodomError as e:
+        assert "__NEXT_DATA__" in str(e)
+
+
+def test_extract_location_bad_json():
+    html = ('<html><script id="__NEXT_DATA__">{not json}</script></html>')
+    try:
+        otodom.extract_location(html, "u")
+        assert False, "expected OtodomError"
+    except OtodomError as e:
+        assert "unparseable" in str(e)
+
+
 if __name__ == "__main__":
     test_parse_item()
     test_parse_handles_missing_fields()
@@ -196,4 +283,9 @@ if __name__ == "__main__":
     test_search_dedup_by_id()
     test_search_skips_failed_location()
     test_fetch_page_404_is_clean()
+    test_extract_location_precise()
+    test_extract_location_approximate()
+    test_extract_location_no_coords()
+    test_extract_location_blocked()
+    test_extract_location_bad_json()
     print("ok")
